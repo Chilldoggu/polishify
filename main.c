@@ -7,24 +7,45 @@
 
 #pragma GCC diagnostic ignored "-Wmultichar"
 
-#define MAX_WORD_SIZ       1024
+#define MAX_WORD_SIZ    1024
+#define DEBUG           1
 
 /* GLOBALS */
-struct trans{
+struct trans {
     char    *ascii;
     wchar_t *unicode;
 } TRANSLATION;
 
+// typedef struct word_similarity {
+//     wchar_t dic_word;
+//     double similarity;
+// } word_sim;
+
+struct dic {
+    wchar_t **dic;
+    long unsigned lines;
+} DIC = { NULL, 0 };
+
+
+
 /* PROTOTYPES */
 void error(char *, ...);
-wchar_t fgetww(wchar_t *, int, FILE *);
-int compare_trans_sizes(char [], wchar_t []);
+void wstrdup(wchar_t *, wchar_t *);
+void dic_init(FILE *);
+void to_lower(wchar_t *);
+void print_dic();
+void turn_ascii(char *, int, wchar_t *);
 void init_translation();
+void translation_loop();
 void print_translation_set();
 int wstrncmp(wchar_t *, wchar_t *, int);
-wchar_t skip_snippet(FILE *);
 int is_ascii(wchar_t *);
-void translation_loop();
+int compare_trans_sizes(char [], wchar_t []);
+int translate_word(wchar_t *, double);
+int get_word_size(wchar_t *);
+unsigned count_lines(FILE *);
+wchar_t fgetww(wchar_t *, int, FILE *);
+wchar_t skip_snippet(FILE *);
 
 /* FUNCTION DEFINITIONS */
 int main(int argc, char **argv)
@@ -39,33 +60,206 @@ int main(int argc, char **argv)
     /* CLEAN */
     free(TRANSLATION.ascii);
     free(TRANSLATION.unicode);
-
+    for (size_t i = 0; i < DIC.lines; i++) {
+        free(DIC.dic[i]);
+    }
+    free(DIC.dic);
+    
     return 0;
+}
+
+void print_dic()
+{
+    for (size_t i = 0; i < DIC.lines; i++) {
+        printf("%d. %ls\n", i+1, DIC.dic[i]);
+    }
 }
 
 void translation_loop()
 {
     wchar_t c;
     wchar_t word[MAX_WORD_SIZ];
-    char *dic_name = "notes.md";
+    char *in_name = "input/notes.md";
     char *out_name = "out.txt";
-    FILE *dic_ptr;
+    char *dic_name = "input/pl_dict.txt";
+    FILE *in_ptr;
     FILE *out_ptr;
+    FILE *dic_ptr;
+    double threshold = 0.95;
 
-    if ((dic_ptr = fopen(dic_name, "r")) == NULL)
-        error("Can't open %s", dic_name);
+    if ((in_ptr = fopen(in_name, "r")) == NULL)
+        error("Can't open %s", in_name);
     if ((out_ptr = fopen(out_name, "w")) == NULL)
         error("Can't open %s", out_name);
+    if ((dic_ptr = fopen(dic_name, "r")) == NULL)
+        error("Can't open %s", dic_name);
 
+    dic_init(dic_ptr);
+    // print_dic();
+
+    printf("        Before translation | After translation\n");
+    printf("        --------------------------------------\n");
     do {
-        c = fgetww(word, MAX_WORD_SIZ, dic_ptr);
+        c = fgetww(word, MAX_WORD_SIZ, in_ptr);
+        // When word is at the end of the file then fgetww sometimes returns '\0', so we check for that. (Bug)
         if (*word) {
-            printf("is ascii?: %d | %ls\n", is_ascii(word), word);
+            // printf("is ascii?: %d | %ls\n", is_ascii(word), word);
+
+            printf("%26ls | ", word);
+            // Translate only ascii words (point of the program)
+            if (is_ascii(word)) {
+                to_lower(word);
+                translate_word(word, threshold);
+            }
+            printf("%ls\n", word);
         }
     } while (c != WEOF);
 
-    fclose(dic_ptr);
+    fclose(in_ptr);
     fclose(out_ptr);
+    fclose(dic_ptr);
+}
+
+void to_lower(wchar_t *word)
+{
+    for (size_t i = 0; word[i]; i++)
+    {
+        if (*word >= 'A' && *word <= 'Z')
+            *word += 'a' - 'A';
+    }
+    
+}
+
+unsigned count_lines(FILE *fp)
+{
+    wchar_t c;
+    unsigned lines = 0;
+    while ((c = fgetwc(fp)) != WEOF)
+        if (c == '\n')
+            lines++; 
+    lines++; // for WEOF
+
+    if (fseek(fp, 0L, SEEK_SET) != 0)
+        error("Fseek error");
+
+    return lines;
+}
+
+void wstrdup(wchar_t *dst, wchar_t *src)
+{
+    while (*src) *dst++ = *src++;
+    *dst = '\0';
+}
+
+void dic_init(FILE *dic_ptr)
+{
+    wchar_t max_line[MAX_WORD_SIZ];
+    wchar_t *p;
+    unsigned word_cnt = 0;
+
+    DIC.lines = count_lines(dic_ptr);
+    DIC.dic = (wchar_t**)malloc(sizeof(wchar_t*)*DIC.lines);
+    
+    for (size_t i = 0; i < DIC.lines; i++) {
+        fgetws(max_line, MAX_WORD_SIZ, dic_ptr);
+        p = max_line;
+        word_cnt = 0;
+
+        // Count line len and delete trailing '\n'
+        while (*p != '\n' && *p != '\0') {
+            word_cnt++;
+            p++;
+        }
+        *p = '\0';
+
+        DIC.dic[i] = (wchar_t *)malloc(sizeof(wchar_t)*(word_cnt+1)); // word_cnt+1 to make space for '\0'
+        wstrdup(DIC.dic[i], max_line);
+    }
+
+    if (fseek(dic_ptr, 0L, SEEK_SET) != 0)
+        error("Fseek error");
+}
+
+int get_word_size(wchar_t *word)
+{
+    int size = 0;
+    for (size_t i = 0; word[i]; i++)
+        size++; 
+    return size;
+}
+
+/* translate_word: translate ascii word only if it's likelihood is inside threshold. Translated word overwrites `word` argument, returns -1 otherwise */
+int translate_word(wchar_t *word, double threshold)
+{
+    wchar_t result[MAX_WORD_SIZ];
+    char dic_word[MAX_WORD_SIZ];
+    int word_size = get_word_size(word);
+    double max_similarity = 0;
+    double word_similarity = 0;
+
+    // Iterate through all dictionary and compare word to each entry.
+    for (size_t i = 0; i < DIC.lines; i++) {
+        // Don't even bother if dictionary entry isn't the same size as word of interest.
+        if (get_word_size(DIC.dic[i]) != word_size)
+            continue;
+
+        turn_ascii(dic_word, MAX_WORD_SIZ, DIC.dic[i]);
+
+        // Calculate how simmilar the word is to ascii dictionary entry.
+        int occurence = 0;
+        for (size_t i = 0; word[i]; i++) {
+            if (word[i] == dic_word[i])
+                occurence++;
+        }
+        word_similarity = occurence/word_size;
+
+        if (word_similarity > max_similarity) {
+            max_similarity = word_similarity;
+            wstrdup(result, DIC.dic[i]); // Copy original dictionary entry into result.
+        } 
+
+        // Nothing will be larger than 100% similarity
+        if (max_similarity == 1) {
+            break;
+        }
+    }
+
+    // If word is unlikely to be translated
+    if (max_similarity < threshold)
+        return -1;
+
+    // printf("%ls ", result);
+    wstrdup(word, result);
+    return 1;
+}
+
+void turn_ascii(char *buf, int n, wchar_t *w_word)
+{
+    if (n < 0)
+        error("turn_ascii() n < 0");
+    
+    while (n-- && *w_word) {
+        // If not ascii then translate
+        if (*w_word > (wchar_t)127) {
+            // Check wheter the character is in translation set, if yes then translate
+            size_t i = 0;
+            for (; TRANSLATION.unicode[i]; i++) {
+                if (TRANSLATION.unicode[i] == *w_word) {
+                    *buf = TRANSLATION.ascii[i];
+                    break;
+                }
+            }
+            if (TRANSLATION.unicode[i] == '\0')
+                error("turn_ascii() character not in translation set.");
+        } else
+            *buf = *w_word;
+
+        buf++;
+        w_word++;
+    }
+    if (n == 0)
+        error("turn_ascii() word out of bounds");
+    *buf = '\0'; // Make sure to check our buf is in bounds before zero terminating
 }
 
 int is_ascii(wchar_t *word)
@@ -124,15 +318,16 @@ int wstrncmp(wchar_t *s1, wchar_t *s2, int n)
 }
 
 /* 
-fgetww: copy word from file stream to s. Returns last character read from file stream.
-        There is an off by one error when reading last word, when it's right before WEOF or not word character(s),
-        so you need (so far) make sure that this function doesn't return empty word.
+fgetww: Copy word from file stream to s. Returns last character read from file stream. It also ignores code blocks that are often part of the markdown notes.
+        There is an off by one error when reading last word, when it's right before WEOF or not word character(s), so you need (so far) make sure that this function doesn't return empty word.
+        (Too complex should be rewritten)
 */
 wchar_t fgetww(wchar_t *s, int n, FILE *fp)
 {
     wchar_t c;
     wchar_t *base = s;
 
+    // Make sure character is either alphabetic or ` or unicode (very bad, should be improved).
     while (n-- && (c = fgetwc(fp)) != ' ' && c != WEOF && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '`' || c > 127))
         *s++ = c;
     if (base == s && c != WEOF) // Ensure there are no empty words.
@@ -145,12 +340,13 @@ wchar_t fgetww(wchar_t *s, int n, FILE *fp)
         return fgetww(base, MAX_WORD_SIZ, fp);
     }
 
-    if (wstrncmp(base, L"`", 1)) { // Not code snippet so must be code block
+    if (wstrncmp(base, L"`", 1)) { // Not code snippet so must be code block (too complex, improve)
         wchar_t *p = base;
         int cnt = 0;
 
         while (p != s)
-            if (*p++ == L'`') cnt++;
+            if (*p++ == L'`') 
+                cnt++;
 
         switch (cnt) {
         case 1:
@@ -161,7 +357,7 @@ wchar_t fgetww(wchar_t *s, int n, FILE *fp)
             break;
 
         default:
-            error("inside fgetww() - word contains more than more than two '`'");
+            error("inside fgetww() - word contains more than two '`'");
             break;
         }
 
@@ -196,9 +392,8 @@ void init_translation()
     char ascii[] = { 'a', 'c', 'e', 'l', 'n', 'o', 's', 'z', 'z', 'A', 'C', 'E', 'L', 'N', 'O', 'S', 'Z', 'Z', '\0' };
     wchar_t unicode[] = { L'ą', L'ć', L'ę', L'ł', L'ń', L'ó', L'ś', L'ź', L'ż', L'Ą', L'Ć', L'Ę', L'Ł', L'Ń', L'Ó', L'Ś', L'Ź', L'Ż', '\0'};
 
-    if ((trans_size = compare_trans_sizes(ascii, unicode)) == -1) {
+    if ((trans_size = compare_trans_sizes(ascii, unicode)) == -1)
         error("Translation ascii and unicode arrays do not overlap!");
-    }
 
     TRANSLATION.ascii = (char *)malloc(trans_size);
     TRANSLATION.unicode  = (wchar_t *)malloc(sizeof(wchar_t)*trans_size);
@@ -216,3 +411,18 @@ void print_translation_set()
         printf("%lc : 0x%04x  |  %lc : 0x%04x\n", TRANSLATION.ascii[i], (unsigned int)TRANSLATION.ascii[i], TRANSLATION.unicode[i], (unsigned int)TRANSLATION.unicode[i]);
     }
 }
+
+/*
+================= GRAVEYARD ================= 
+
+unsigned dic_max_word(FILE *dic_ptr)
+{
+    wchar_t max_line[MAX_WORD_SIZ];
+    long unsigned lines = 0;
+    while (fgetws(max_line, MAX_WORD_SIZ, dic_ptr)) {
+        lines++;
+    }
+    return 0;
+}
+
+*/
