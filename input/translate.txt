@@ -1,0 +1,15 @@
+wielo
+Wyswietlenie
+Przyklad
+Przyklady
+`znakow`
+sa
+rozne
+```c
+int main()
+{
+    return 0;
+}
+```
+
+ksiazka do programowania

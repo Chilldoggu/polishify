@@ -1,11 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <string.h>
 #include <locale.h>
 #include <wchar.h>
 #include <stddef.h>
-
-#pragma GCC diagnostic ignored "-Wmultichar"
 
 #define MAX_WORD_SIZ    1024
 #define DEBUG           1
@@ -26,8 +25,6 @@ struct dic {
     long unsigned lines;
 } DIC = { NULL, 0 };
 
-
-
 /* PROTOTYPES */
 void error(char *, ...);
 void wstrdup(wchar_t *, wchar_t *);
@@ -35,14 +32,16 @@ void dic_init(FILE *);
 void to_lower(wchar_t *);
 void print_dic();
 void turn_ascii(char *, int, wchar_t *);
+void make_upper_again(wchar_t *, wchar_t *);
 void init_translation();
-void translation_loop();
+void translation_loop(char *, char *);
 void print_translation_set();
 int wstrncmp(wchar_t *, wchar_t *, int);
 int is_ascii(wchar_t *);
 int compare_trans_sizes(char [], wchar_t []);
 int translate_word(wchar_t *, double);
 int get_word_size(wchar_t *);
+int get_word_byte_size(wchar_t *);
 unsigned count_lines(FILE *);
 wchar_t fgetww(wchar_t *, int, FILE *);
 wchar_t skip_snippet(FILE *);
@@ -50,12 +49,43 @@ wchar_t skip_snippet(FILE *);
 /* FUNCTION DEFINITIONS */
 int main(int argc, char **argv)
 {
+    char c;
+    char *output_name = NULL;
+    char *input_name  = NULL;
+    char tmp[MAX_WORD_SIZ] = "out_";
+
+    while (--argc > 0 && (*++argv)[0] == '-') {
+        char *argument = argv[0];
+        while (c = *++argument) {
+            switch (c) {
+            case 'o':
+                output_name = strdup(*++argv);
+                --argc;
+                break;
+            default:
+                error("polishify: illegal option %c\n", c);
+                argc = 0;
+                break;
+            }
+        }
+    }
+
+    if (argc == 1) {
+        input_name = strdup(*argv);
+    } else {
+        printf("Usage: polishify [ -o output_name ] input_file\n");
+        return 1;
+    }
+
+    if (output_name == NULL)
+        output_name = strcat(tmp, input_name);
+    
     setlocale(LC_ALL, "C.utf8");
 
     init_translation();
     // print_translation_set();
 
-    translation_loop();
+    translation_loop(input_name, output_name);
 
     /* CLEAN */
     free(TRANSLATION.ascii);
@@ -75,19 +105,23 @@ void print_dic()
     }
 }
 
-void translation_loop()
+void translation_loop(char *in_name, char *out_name)
 {
     wchar_t c;
     wchar_t word[MAX_WORD_SIZ];
-    char *in_name = "input/notes.md";
-    char *out_name = "out.txt";
+    wchar_t original[MAX_WORD_SIZ];
     char *dic_name = "input/pl_dict.txt";
     FILE *in_ptr;
+    FILE *in_ptr2;
     FILE *out_ptr;
     FILE *dic_ptr;
     double threshold = 0.95;
+    int word_pos = 0;
+    int word_siz = 0;
 
     if ((in_ptr = fopen(in_name, "r")) == NULL)
+        error("Can't open %s", in_name);
+    if ((in_ptr2 = fopen(in_name, "r")) == NULL)
         error("Can't open %s", in_name);
     if ((out_ptr = fopen(out_name, "w")) == NULL)
         error("Can't open %s", out_name);
@@ -95,37 +129,105 @@ void translation_loop()
         error("Can't open %s", dic_name);
 
     dic_init(dic_ptr);
-    // print_dic();
 
-    printf("        Before translation | After translation\n");
-    printf("        --------------------------------------\n");
+    // printf("        Before translation | After translation\n");
+    // printf("        --------------------------------------\n");
     do {
         c = fgetww(word, MAX_WORD_SIZ, in_ptr);
         // When word is at the end of the file then fgetww sometimes returns '\0', so we check for that. (Bug)
         if (*word) {
-            // printf("is ascii?: %d | %ls\n", is_ascii(word), word);
+            // printf("%26ls | ", word);
+            word_siz = get_word_byte_size(word);
 
-            printf("%26ls | ", word);
             // Translate only ascii words (point of the program)
             if (is_ascii(word)) {
+                wstrdup(original, word);
                 to_lower(word);
                 translate_word(word, threshold);
+                make_upper_again(original, word);
             }
-            printf("%ls\n", word);
+
+            if (c != WEOF) {
+                word_pos = ftell(in_ptr) - word_siz - 1;
+            } else
+                word_pos = ftell(in_ptr) - word_siz;
+
+            while (ftell(in_ptr2) < word_pos) {
+                fputwc(fgetwc(in_ptr2), out_ptr);
+            }
+            fputws(word, out_ptr);
+            fseek(in_ptr2, word_siz, SEEK_CUR);
+            // printf("%ls\n", word);
         }
     } while (c != WEOF);
+
+    while (ftell(in_ptr2) < ftell(in_ptr)) {
+        fputwc(fgetwc(in_ptr2), out_ptr);
+    }
 
     fclose(in_ptr);
     fclose(out_ptr);
     fclose(dic_ptr);
 }
 
+
+void make_upper_again(wchar_t *original, wchar_t *word) {
+    for (size_t i = 0; original[i]; i++) {
+        if (original[i] >= 'A' && original[i] <= 'Z') {
+            if (word[i] > (wchar_t)127) {
+                for (size_t j = 0; TRANSLATION.ascii[j]; j++) {
+                    if (TRANSLATION.ascii[j] == original[i]) {
+                        word[i] = TRANSLATION.unicode[j];
+                    }
+                }
+            } else {
+                word[i] -= 'a' - 'A';
+            }
+        }
+    }
+}
+
+/* get_word_byte_size: get amount of bytes that it takes to write a word to a file in UTF-8 encoding by comparing UNICODEs. */
+int get_word_byte_size(wchar_t *word)
+{
+    short byte_shift = 8;
+
+    wchar_t c;
+    int bytes_siz = 0;
+    while (c = *word++) {
+        // Outside of known UNICODE codes (at this date and time)
+        if ((c >> (byte_shift * 3)) || \
+            (c >> (byte_shift * 2)) > 0x10) {
+            error("get_word_byte_size(): character '%lc' out of bounds. whole: %0.8x, 4byte: %x, 3byte: %x, test: %0.8x", c, c, c >> (byte_shift * 3), c >> (byte_shift * 2), 0x70 >> 4);
+        // Inside 4 byte UTF-8 encoding
+        } else if (c >> (byte_shift * 2) <= 0x10 && \
+                   c >> (byte_shift * 2) >= 0x01) {
+            // printf("4byte: %lc\n", c);
+            bytes_siz += 4;
+        // Inside 3 byte UTF-8 encoding
+        } else if (c >> (byte_shift * 1) <= 0xFF && \
+                   c >> (byte_shift * 1) >= 0x08) {
+            // printf("3byte: %lc\n", c);
+            bytes_siz += 3;
+        // Inside 2 byte UTF-8 encoding
+        } else if (c >> (byte_shift * 1) <= 0x07 && \
+                   c >> (byte_shift * 0) >= 0x80) {
+            // printf("2byte: %lc\n", c);
+            bytes_siz += 2;
+        } else {
+            // printf("1byte: %lc\n", c);
+            bytes_siz += 1;
+        }
+    }
+
+    return bytes_siz;
+}
+
 void to_lower(wchar_t *word)
 {
-    for (size_t i = 0; word[i]; i++)
-    {
-        if (*word >= 'A' && *word <= 'Z')
-            *word += 'a' - 'A';
+    for (size_t i = 0; word[i]; i++) {
+        if (word[i] >= 'A' && word[i] <= 'Z')
+            word[i] += 'a' - 'A';
     }
     
 }
@@ -411,18 +513,3 @@ void print_translation_set()
         printf("%lc : 0x%04x  |  %lc : 0x%04x\n", TRANSLATION.ascii[i], (unsigned int)TRANSLATION.ascii[i], TRANSLATION.unicode[i], (unsigned int)TRANSLATION.unicode[i]);
     }
 }
-
-/*
-================= GRAVEYARD ================= 
-
-unsigned dic_max_word(FILE *dic_ptr)
-{
-    wchar_t max_line[MAX_WORD_SIZ];
-    long unsigned lines = 0;
-    while (fgetws(max_line, MAX_WORD_SIZ, dic_ptr)) {
-        lines++;
-    }
-    return 0;
-}
-
-*/
