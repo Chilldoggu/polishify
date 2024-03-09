@@ -10,7 +10,7 @@ If you want to translate an array of files you could use for example:
 #!/bin/bash
 
 # Define the array of filenames
-filenames=('wide char, locale, internalizacja.md' 'Ellipsis.md' 'Zpredefiniowane nazwy.md' 'Union.md' 'malloc.md' 'fsize - rekursywne wyswietlanie rozmiarow kartoteki.md' 'Low-level funkcje.md' 'flushing buffer.md')
+filenames=('file1', 'file2', 'file3')
 
 # Iterate through each filename in the array
 for file in "${filenames[@]}"; do
